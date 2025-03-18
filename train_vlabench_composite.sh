@@ -1,0 +1,2 @@
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py pi0_fast_vlabench_composite_lora --exp-name=pi0_fast_vlabench_composite_lora --overwrite
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py pi0_vlabench_composite_lora --exp-name=pi0_vlabench_composite_lora --overwrite

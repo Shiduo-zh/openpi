@@ -3,8 +3,10 @@ import dataclasses
 import logging
 import math
 import pathlib
+import os
 
 import imageio
+from datetime import datetime
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
@@ -167,8 +169,12 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
+            now = datetime.now()
+            current_time = now.strftime("%Y-%m-%d%H:%M:%S")
+            video_out_path = os.path.join(args.video_out_path, task_segment)
+            os.makedirs(video_out_path, exist_ok=True)
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                pathlib.Path(video_out_path) / f"{current_time}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )

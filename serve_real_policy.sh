@@ -1,0 +1,1 @@
+uv run scripts/serve_policy.py --env VLABENCH policy:checkpoint --policy.config=pi0_fast_real_mahjong_lora --policy.dir=/remote-home1/sdzhang/project/openpi/checkpoints/pi0_fast_real_mahjong_lora/pi0_fast_real_mahjong_lora/29999
