@@ -1,4 +1,4 @@
-# openpi
+# openpi adapted to VLABench
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
 
@@ -10,6 +10,7 @@ For both models, we provide _base model_ checkpoints, pre-trained on 10k+ hours 
 
 This is an experiment: $\pi_0$ was developed for our own robots, which differ from the widely used platforms such as [ALOHA](https://tonyzhaozh.github.io/aloha/) and [DROID](https://droid-dataset.github.io/), and though we are optimistic that researchers and practitioners will be able to run creative new experiments adapting $\pi_0$ to their own platforms, we do not expect every such attempt to be successful. All this is to say: $\pi_0$ may or may not work for you, but you are welcome to try it and see!
 
+<span style="font-size:16px"> 🚨 <span style="color:#AB4459;">**NOTICE:**</span>The repository is a fork that adapts the source repository to VLABench's training and evaluation, and is used as a submodule of VLABench. Please refer to [here](examples/vlabench/README.md) for pi0 evaluation on vlabench. For finetuning, please refer to the script `train_vlabench_primitive.sh`.</span>
 
 ## Requirements
 
