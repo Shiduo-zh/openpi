@@ -11,7 +11,7 @@ from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
-
+# install vlabench in venv first
 from VLABench.utils.utils import euler_to_quaternion, quaternion_to_euler
 from VLABench.envs import load_env
 from VLABench.evaluation.evaluator import Evaluator
@@ -60,12 +60,14 @@ class Pi0(Policy):
     
     def predict(self, obs, **kwargs):
         if len(self.action_plan) == 0:
-            image, _, _, image_wrist = obs["rgb"]
+            _, _, image, image_wrist = obs["rgb"]
             state = obs["ee_state"]
+            last_action = obs["last_action"].copy()
             pos, quat, gripper_state = state[:3], state[3:7], state[-1]
             ee_euler = quaternion_to_euler(quat)
             pos -= np.array([0, -0.4, 0.78])
             state = np.concatenate([pos, ee_euler, np.array(gripper_state).reshape(-1)])
+            # last_action = np.concatenate([last_action, np.array(gripper_state).reshape(-1)])
             policy_input = {
                 "observation/image": image,
                 "observation/wrist_image": image_wrist,
@@ -112,7 +114,7 @@ def main(args:Args) -> None:
         tasks=tasks,
         n_episodes=args.n_episode,
         episode_config=episode_configs,
-        max_substeps=10,   
+        max_substeps=1,   
         save_dir=args.save_dir,
         visulization=args.visulization,
         metrics=metrics,
