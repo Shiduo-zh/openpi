@@ -27,25 +27,22 @@ class Args:
     #################################################################################################################
     # Model server parameters
     #################################################################################################################
-    host: str = "10.176.52.118"
+    host: str = "0.0.0.0"
     port: int = 8000
-    resize_size: int = 480
     replan_steps: int = 5
 
     #################################################################################################################
     # VLABench environment-specific parameters
     #################################################################################################################
-    tasks: str="select_fruit select_toy"
+    tasks: str = None
     eval_track: str = None
-    num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     n_episode: int = 50  # Number of rollouts per task
-    episode_config_path:str = "/remote-home1/sdzhang/project/VLABench/track_1_new.json"
     intention_score_threshold: float=0.2
     #################################################################################################################
     # Utils
     #################################################################################################################
     metrics: str = "success_rate intention_score progress_score"
-    save_dir: str = "data/vlabench/pi0_fast_lora/track_1"  # Path to save videos
+    save_dir: str = None  # Path to save videos
     visulization: bool = True
     seed: int = 7  # Random Seed (for reproducibility
 
@@ -60,7 +57,7 @@ class Pi0(Policy):
     
     def predict(self, obs, **kwargs):
         if len(self.action_plan) == 0:
-            _, _, image, image_wrist = obs["rgb"]
+            second_image, _, image, image_wrist = obs["rgb"]
             state = obs["ee_state"]
             last_action = obs["last_action"].copy()
             pos, quat, gripper_state = state[:3], state[3:7], state[-1]
@@ -70,6 +67,7 @@ class Pi0(Policy):
             # last_action = np.concatenate([last_action, np.array(gripper_state).reshape(-1)])
             policy_input = {
                 "observation/image": image,
+                "observation/second_image": second_image,
                 "observation/wrist_image": image_wrist,
                 "observation/state": state,
                 "prompt": obs["instruction"]
@@ -94,16 +92,19 @@ class Pi0(Policy):
         return "pi0"
 
 def main(args:Args) -> None:
+    save_dir = args.save_dir
+    assert save_dir is not None
     if args.eval_track is not None:
-        with open(os.path.join(os.getenv("VLABENCH_ROOT"), "configs/evaluation/tracks", args.eval_track), "r") as f:
-            tasks = json.load(f)
-    else:
+        with open(os.path.join(os.getenv("VLABENCH_ROOT"), "configs/evaluation/tracks", f"{args.eval_track}.json"), "r") as f:
+            episode_configs = json.load(f)
+            tasks = list(episode_configs.keys())
+        save_dir = os.path.join(save_dir, args.eval_track)
+        os.makedirs(save_dir, exist_ok=True)
+    if args.tasks is not None:
         tasks = args.tasks.split(" ")
     metrics = args.metrics.split(" ")
     assert isinstance(tasks, list)
 
-    with open(args.episode_config_path, "r")  as f:
-        episode_configs=json.load(f)
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
     policy = Pi0(
         client=client,
@@ -115,10 +116,10 @@ def main(args:Args) -> None:
         n_episodes=args.n_episode,
         episode_config=episode_configs,
         max_substeps=1,   
-        save_dir=args.save_dir,
+        save_dir=save_dir,
         visulization=args.visulization,
         metrics=metrics,
-        intention_score_threshold=args.intention_score_threshold
+        # intention_score_threshold=args.intention_score_threshold
     )
     
 
