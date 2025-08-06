@@ -206,7 +206,7 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
+        state, actions = data["state"], data["actions"] # (7), (n, 7)
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
@@ -214,6 +214,34 @@ class DeltaActions(DataTransformFn):
 
         return data
 
+@dataclasses.dataclass(frozen=True)
+class RLDSDeltaActions(DataTransformFn):
+    """Repacks absolute actions into delta action space."""
+
+    # Boolean mask for the action dimensions to be repacked into delta action space. Length
+    # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
+    # See `make_bool_mask` for more details.
+    mask: Sequence[bool] | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None:
+            return data
+        
+        state, actions = data["state"], data["actions"]
+        assert (len(actions.shape) - len(state.shape)) == 1, f"error with state shape:{state.shape}, action shape:{actions.shape}"
+        mask = np.asarray(self.mask)
+        if isinstance(actions, np.ndarray):
+            new_actions = actions.copy()
+        else:
+            new_actions = actions.clone()
+        idx = np.flatnonzero(mask)  
+        for i in idx:
+            new_actions[0, i] = actions[0, i] - state[i]
+            new_actions[1:, i] = actions[1:, i] - actions[:-1, i]
+        # normalize to [-pi, pi]
+        new_actions[..., 3:6] = (new_actions[..., 3:6] + np.pi) % (2 * np.pi) - np.pi
+        data["actions"] = new_actions
+        return data
 
 @dataclasses.dataclass(frozen=True)
 class AbsoluteActions(DataTransformFn):
@@ -234,6 +262,35 @@ class AbsoluteActions(DataTransformFn):
         actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
         data["actions"] = actions
 
+        return data
+
+@dataclasses.dataclass(frozen=True)
+class RLDSAbsoluteActions(DataTransformFn):
+    """Repacks delta actions into absolute action space."""
+
+    # Boolean mask for the action dimensions to be repacked into absolute action space. Length
+    # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
+    # See `make_bool_mask` for more details.
+    mask: Sequence[bool] | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None:
+            return data
+
+        state, actions = data["state"], data["actions"]
+        assert (len(actions.shape) - len(state.shape)) == 1, f"error with state shape:{state.shape}, action shape:{actions.shape}"
+        mask = np.asarray(self.mask)
+        if isinstance(actions, np.ndarray):
+            new_actions = actions.copy()
+        else:
+            new_actions = actions.clone()
+        idx = np.flatnonzero(mask)
+
+        for i in idx:
+            new_actions[:, i] = np.cumsum(actions[:, i], axis=0)
+            new_actions[:, i] += state[i]
+        new_actions[..., 3:6] = (new_actions[..., 3:6] + np.pi) % (2 * np.pi) - np.pi
+        data["actions"] = new_actions
         return data
 
 

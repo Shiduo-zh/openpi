@@ -47,11 +47,11 @@ def main(config_name: str, max_frames: int | None = None):
     if max_frames is not None and max_frames < num_frames:
         num_frames = max_frames
         shuffle = True
-
+    print("load dataloader")
     data_loader = _data_loader.TorchDataLoader(
         dataset,
         local_batch_size=1,
-        num_workers=8,
+        num_workers=16,
         shuffle=shuffle,
         num_batches=num_frames,
     )
@@ -61,7 +61,7 @@ def main(config_name: str, max_frames: int | None = None):
 
     for batch in tqdm.tqdm(data_loader, total=num_frames, desc="Computing stats"):
         for key in keys:
-            values = np.asarray(batch[key][0])
+            values = np.asarray(batch[key][:, 0]) # action shape (bsz, seq_len, dim); proprio shape (bsz, dim)
             stats[key].update(values.reshape(-1, values.shape[-1]))
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}

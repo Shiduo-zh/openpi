@@ -52,19 +52,20 @@ class VLABenchInputs(transforms.DataTransformFn):
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference
         base_image = _parse_image(data["observation/image"])
+        second_image = _parse_image(data["observation/second_image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 
         inputs = {
             "state": state,
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                "left_wrist_0_rgb": second_image,
+                "right_wrist_0_rgb": wrist_image,
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
                 "left_wrist_0_rgb": np.True_,
-                "right_wrist_0_rgb": np.False_ if mask_padding else np.True_,
+                "right_wrist_0_rgb": np.True_,
             },
         }
 
