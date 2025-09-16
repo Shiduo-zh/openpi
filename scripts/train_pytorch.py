@@ -360,8 +360,10 @@ def train_loop(config: _config.TrainConfig):
 
     # Log sample images to wandb on first batch
     if is_main and config.wandb_enabled and not resuming:
+        
+        temp_config = dataclasses.replace(config, num_workers=0)
         # Create a separate data loader for sample batch to avoid consuming the main loader
-        sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
+        sample_data_loader = _data.create_data_loader(temp_config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
         # Convert observation and actions to torch tensors
         observation, actions = sample_batch
@@ -388,6 +390,7 @@ def train_loop(config: _config.TrainConfig):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logging.info("Cleared sample batch and data loader from memory")
+
 
     # Build model
     if not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
@@ -623,6 +626,7 @@ def train_loop(config: _config.TrainConfig):
 
 
 def main():
+    torch.multiprocessing.set_start_method('spawn', force=True)
     init_logging()
     config = _config.cli()
     train_loop(config)

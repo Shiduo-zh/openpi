@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.vlabench_policy as vlabench_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -88,6 +89,9 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    
+    # If true, will disable syncing the dataset from the Hugging Face Hub. Allows training on local-only datasets.
+    local_files_only: bool = False
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -352,6 +356,94 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
+        
+@dataclasses.dataclass(frozen=True)
+class LeRobotVLABenchDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Make inputs look like they come from the Libero environment
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/second_image": "second_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[vlabench_policy.VLABenchInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[vlabench_policy.VLABenchOutputs()],
+        )
+        # Use delta actions (not for gripper)
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )        
+
+
+@dataclasses.dataclass(frozen=True)
+class AlignedLeRobotVLABenchDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Make inputs look like they come from the Libero environment
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/second_image": "second_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[vlabench_policy.VLABenchInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[vlabench_policy.VLABenchOutputs()],
+        )
+        # Use delta actions (not for gripper)
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.RLDSDeltaActions(delta_action_mask)],
+            outputs=[_transforms.RLDSAbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
 
 
 @dataclasses.dataclass(frozen=True)
@@ -504,7 +596,7 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 1000
+    save_interval: int = 5000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -920,6 +1012,319 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    # VLABench configs
+    TrainConfig(
+        name="pi0_ft_vlabench_primitive",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_ft_vlabench_primitive",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi05_base/",
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_ft_vlabench_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pi0_ft_vlabench_composite",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_composite",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_ft_vlabench_composite",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_composite",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pi0_scratch_vlabench_primitive",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_scratch_vlabench_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    # Larger VLABench datasets
+    TrainConfig(
+        name="pi0_posttrain_vlabench_primitive",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_posttrain_vlabench_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pi0_pretrain_vlabench_primitive",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_pretrain_vlabench_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    ########################################################
+    # Align to delta of ajencent actions - VLABench configs#
+    ########################################################
+    TrainConfig(
+        name="pi0_ft_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi0_ft_scratch_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi0_posttrain_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi0_pretrain_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pifast_ft_vlabench_primitive_aligned",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pifast_ft_vlabench_primitive_aligned_q99",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+                use_quantile_norm=True
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pifast_posttrain_vlabench_primitive_aligned",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pifast_ft_scratch_vlabench_primitive_aligned",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=30000,
+        batch_size=32,
+        num_workers=64
+    ),
+    TrainConfig(
+        name="pifast_pretrain_vlabench_primitive_aligned",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64
     ),
     #
     # Debugging configs.
