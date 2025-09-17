@@ -40,6 +40,9 @@ import torch.nn.parallel
 import tqdm
 import wandb
 
+import transformers
+
+import openpi.models.pi0_fast
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
@@ -393,7 +396,26 @@ def train_loop(config: _config.TrainConfig):
 
 
     # Build model
-    if not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
+    if isinstance(config.model, openpi.models.pi0_fast.Pi0FASTConfig):
+        # This is the new logic for pi0_fast
+        model_cfg = config.model
+        # For fine-tuning, we load the model from the converted checkpoint path
+        if not config.pytorch_weight_path:
+            raise ValueError("`pytorch_weight_path` must be provided for fine-tuning a pi0_fast model.")
+        
+        print(f"Loading PaliGemmaForConditionalGeneration model from {config.pytorch_weight_path}...")
+        
+        # Determine the precision to load the model in
+        model_dtype = torch.bfloat16 if config.pytorch_training_precision == "bfloat16" else torch.float32
+        
+        model = transformers.PaliGemmaForConditionalGeneration.from_pretrained(
+            config.pytorch_weight_path, torch_dtype=model_dtype
+        ).to(device)
+        
+        # No need to load weights here again as from_pretrained does it.
+        # We will set pytorch_weight_path to None to skip the generic loading block later.
+        config.pytorch_weight_path = None
+    elif not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
         # Convert dataclass to Pi0Config if needed
         model_cfg = openpi.models.pi0_config.Pi0Config(
             dtype=config.pytorch_training_precision,
@@ -405,9 +427,9 @@ def train_loop(config: _config.TrainConfig):
             pi05=getattr(config.model, "pi05", False),
         )
     else:
-        model_cfg = config.model
-        # Update dtype to match pytorch_training_precision
-        object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
+            model_cfg = config.model
+            # Update dtype to match pytorch_training_precision
+            object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
 
@@ -527,16 +549,17 @@ def train_loop(config: _config.TrainConfig):
             # Update LR
             for pg in optim.param_groups:
                 pg["lr"] = lr_schedule(global_step)
+                
+            if isinstance(config.model, openpi.models.pi0_config.Pi0Config):
+                # Forward pass
+                losses = model(observation, actions)
+                # Ensure losses is a tensor and handle different return types
+                if isinstance(losses, list | tuple):
+                    losses = torch.stack(losses)
+                elif not isinstance(losses, torch.Tensor):
+                    losses = torch.tensor(losses, device=device, dtype=torch.float32)
 
-            # Forward pass
-            losses = model(observation, actions)
-            # Ensure losses is a tensor and handle different return types
-            if isinstance(losses, list | tuple):
-                losses = torch.stack(losses)
-            elif not isinstance(losses, torch.Tensor):
-                losses = torch.tensor(losses, device=device, dtype=torch.float32)
-
-            loss = losses.mean()
+                loss = losses.mean()
 
             # Backward pass
             loss.backward()

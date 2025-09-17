@@ -3,27 +3,27 @@
 Load a JAX model and print all parameter keys, with optional conversion to PyTorch.
 
 This script loads a JAX model checkpoint using orbax and can either:
-1. Print out all the parameter keys in a hierarchical structure for inspection
-2. Convert the JAX model to PyTorch format using our PI0Pytorch model
+1. Print out all the parameter keys in a hierarchical structure for inspection.
+2. Convert the JAX model to a PyTorch format.
+   - PI0/PI05 models are converted to the custom PI0Pytorch class.
+   - PI0-Fast/PaliGemma models are converted to a standard Hugging Face PaliGemmaForConditionalGeneration model.
 
 Usage:
     # Just inspect keys:
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
+    python examples/convert_jax_model_to_pytorch.py --config_name <config> --checkpoint_dir /path/to/checkpoint --inspect_only
 
     # Convert to PyTorch:
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
+    python examples/convert_jax_model_to_pytorch.py --config_name <config> --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
 
 Example:
     # pi0_droid
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid_pytorch
+    python examples/convert_jax_model_to_pytorch.py --config_name pi0_droid --checkpoint_dir /path/to/pi0_droid --output_path /path/to/pi0_droid_pytorch
 
-    # pi0_aloha_sim
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch
+    # pi0_fast_droid
+    python examples/convert_jax_model_to_pytorch.py --config_name pi0_fast_droid --checkpoint_dir /path/to/pi0_fast_droid --output_path /path/to/pi0_fast_droid_pytorch
 
-    # pi05_droid
-    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi05_droid --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi05_droid_pytorch
+    # paligemma (example config name)
+    python examples/convert_jax_model_to_pytorch.py --config_name paligemma_droid --checkpoint_dir /path/to/paligemma_droid --output_path /path/to/paligemma_droid_pytorch
 """
 
 import json
@@ -37,11 +37,13 @@ import numpy as np
 import orbax.checkpoint as ocp
 import safetensors
 import torch
+import transformers
 import tyro
 
 import openpi.models.gemma
 import openpi.models.model
 import openpi.models.pi0_config
+import openpi.models.pi0_fast
 import openpi.models_pytorch.pi0_pytorch
 from openpi.training import utils
 import openpi.training.config as _config
@@ -555,6 +557,145 @@ def convert_pi0_checkpoint(
     print(f"Model saved to {output_path}")
 
 
+def convert_paligemma_checkpoint(
+    checkpoint_dir: str, precision: str, output_path: str, model_config
+):
+    """
+    Convert a JAX PaliGemma-style checkpoint (like pi0_fast or a standalone PaliGemma) to PyTorch format.
+
+    Args:
+        checkpoint_dir: Path to the JAX checkpoint
+        precision: Model precision (float32, bfloat16, float16)
+        output_path: Path to save the converted PyTorch model
+        model_config: The model configuration object.
+    """
+    model_type = "PI0-Fast" if isinstance(model_config, openpi.models.pi0_fast.Pi0FASTConfig) else "PaliGemma"
+    print(f"Converting {model_type} checkpoint from {checkpoint_dir} to {output_path}")
+    print(f"Model config: {model_config}")
+
+    # Break down orbax ckpts by restoring via JAX to respect dtype
+    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision="float32")
+
+    # This helper class holds the architectural constants for PaliGemma-2B.
+    class PaliGemmaConstants:
+        def __init__(self):
+            self.vision_config = type(
+                "obj",
+                (object,),
+                {
+                    "hidden_size": 1152,
+                    "num_hidden_layers": 27,
+                    "num_attention_heads": 16,
+                    "intermediate_size": 4304,
+                    "patch_size": 14,
+                    "projection_dim": 2048,
+                },
+            )()
+            self.text_config = type(
+                "obj",
+                (object,),
+                {
+                    "hidden_size": 2048,
+                    "num_hidden_layers": 18,
+                    "num_attention_heads": 8,
+                    "num_kv_heads": 1,  # Important for gemma-2b
+                    "head_dim": 256,
+                    "intermediate_size": 16384,
+                },
+            )()
+
+    paligemma_constants = PaliGemmaConstants()
+
+    # Process PaliGemma weights. For single-VLM models, expert_params should be empty.
+    paligemma_params, expert_params = slice_paligemma_state_dict(
+        initial_params["paligemma_params"], paligemma_constants
+    )
+    if expert_params:
+        raise ValueError(f"Found unexpected expert parameters in a {model_type} checkpoint.")
+
+    # Remap keys for Hugging Face PaliGemmaForConditionalGeneration model
+    remapped_params = {}
+    prefix_to_remove = "paligemma_with_expert.paligemma."
+    for key, value in paligemma_params.items():
+        if key.startswith(prefix_to_remove):
+            new_key = key[len(prefix_to_remove) :]
+            # The lm_head weights are tied to the embedding weights in HF
+            if new_key == "model.language_model.embed_tokens.weight":
+                remapped_params["model.language_model.embed_tokens.weight"] = value
+                remapped_params["lm_head.weight"] = value
+            else:
+                remapped_params[new_key] = value
+        else:
+            print(f"Warning: key '{key}' does not have the expected prefix and will be ignored.")
+
+    # Instantiate Hugging Face model from configuration
+    vision_config = transformers.SiglipVisionConfig(
+        hidden_size=paligemma_constants.vision_config.hidden_size,
+        num_hidden_layers=paligemma_constants.vision_config.num_hidden_layers,
+        num_attention_heads=paligemma_constants.vision_config.num_attention_heads,
+        intermediate_size=paligemma_constants.vision_config.intermediate_size,
+        patch_size=paligemma_constants.vision_config.patch_size,
+        vision_use_head=False,  # Crucial: PaliGemma uses unpooled features
+    )
+
+    text_config = transformers.GemmaConfig(
+        hidden_size=paligemma_constants.text_config.hidden_size,
+        num_hidden_layers=paligemma_constants.text_config.num_hidden_layers,
+        num_attention_heads=paligemma_constants.text_config.num_attention_heads,
+        num_key_value_heads=paligemma_constants.text_config.num_kv_heads,
+        head_dim=paligemma_constants.text_config.head_dim,
+        intermediate_size=paligemma_constants.text_config.intermediate_size,
+        vocab_size=257152,
+    )
+
+    hf_config = transformers.PaliGemmaConfig(
+        vision_config=vision_config,
+        text_config=text_config,
+        projection_dim=paligemma_constants.vision_config.projection_dim,
+        vocab_size=257152,
+        image_token_index=257000,
+    )
+
+    model = transformers.PaliGemmaForConditionalGeneration(hf_config)
+
+    # Load state dict
+    model.load_state_dict(remapped_params, strict=True)
+
+    if precision == "float32":
+        model = model.to(torch.float32)
+    elif precision == "bfloat16":
+        model = model.to(torch.bfloat16)
+    else:
+        raise ValueError(f"Invalid precision: {precision}")
+
+    # Save the converted model using safetensors
+    os.makedirs(output_path, exist_ok=True)
+    safetensors.torch.save_model(model, os.path.join(output_path, "model.safetensors"))
+
+    # Copy assets folder if it exists
+    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
+    if assets_source.exists():
+        assets_dest = pathlib.Path(output_path) / "assets"
+        if assets_dest.exists():
+            shutil.rmtree(assets_dest)
+        shutil.copytree(assets_source, assets_dest)
+
+    # Save HF config as JSON for easy loading with .from_pretrained()
+    model.config.save_pretrained(output_path)
+
+    # Save our simple config as JSON for reference
+    config_dict = {
+        "model_type": model_type.lower(),
+        "paligemma_variant": getattr(model_config, "paligemma_variant", "gemma_2b"),
+        "precision": precision,
+    }
+    with open(os.path.join(output_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+    print("Model conversion completed successfully!")
+    print(f"Model saved to {output_path}")
+
+
 def main(
     checkpoint_dir: str,
     config_name: str,
@@ -567,20 +708,26 @@ def main(
 
     Args:
         checkpoint_dir: Path to the JAX checkpoint directory
-        output_path: Path to save converted PyTorch model (required for conversion)
-        precision: Precision for model conversion
-        inspect_only: Only inspect parameter keys, don't convert
+        config_name: The name of the training configuration to use (e.g., 'pi0_droid').
+        output_path: Path to save converted PyTorch model (required for conversion).
+        precision: Precision for model conversion.
+        inspect_only: Only inspect parameter keys, don't convert.
     """
     model_config = _config.get_config(config_name).model
-    if not isinstance(model_config, openpi.models.pi0_config.Pi0Config):
-        raise ValueError(f"Config {config_name} is not a Pi0Config")
     if inspect_only:
         load_jax_model_and_print_keys(checkpoint_dir)
-    else:
-        if not output_path:
-            print("Error: --output_path is required for conversion. Use --inspect_only to only view keys.")
-            return
+        return
+
+    if not output_path:
+        print("Error: --output_path is required for conversion. Use --inspect_only to only view keys.")
+        return
+
+    if isinstance(model_config, openpi.models.pi0_config.Pi0Config):
         convert_pi0_checkpoint(checkpoint_dir, precision, output_path, model_config)
+    else:
+        # This branch handles PI0-Fast, standalone PaliGemma, and any other
+        # single-VLM architectures based on PaliGemma.
+        convert_paligemma_checkpoint(checkpoint_dir, precision, output_path, model_config)
 
 
 if __name__ == "__main__":
