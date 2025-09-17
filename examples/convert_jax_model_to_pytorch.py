@@ -618,7 +618,8 @@ def convert_paligemma_checkpoint(
     # --- START OF MODIFICATION ---
 
     # Remap keys to match the PI0FastPytorch model structure.
-    # We need to change the prefix from `paligemma_with_expert.paligemma.` to `paligemma.`
+    # The JAX model has keys starting with `paligemma_with_expert.paligemma.`, 
+    # but the PyTorch model expects them to start with `paligemma.`
     remapped_params = {}
     old_prefix = "paligemma_with_expert.paligemma."
     new_prefix = "paligemma."
@@ -627,27 +628,56 @@ def convert_paligemma_checkpoint(
             new_key = new_prefix + key[len(old_prefix):]
             remapped_params[new_key] = value
         else:
-            # Also handle the lm_head which is tied in the JAX model but separate here
-            # and may not have the full prefix after initial slicing.
-            # The original script's logic for this was flawed.
-            # Let's ensure lm_head is handled explicitly if it exists.
-            # NOTE: For pi0_fast, there is no lm_head in JAX, it's part of the embedder.
-            # The pytorch model has a separate lm_head. We will tie them.
-            print(f"Warning: key '{key}' does not have the expected prefix and will be handled separately.")
+            # If the key does not have the prefix, add it to the dictionary as is
+            remapped_params[key] = value
 
     # The lm_head weights are tied to the embedding weights. Let's ensure this is reflected.
     embedding_weight_key = "paligemma.model.language_model.embed_tokens.weight"
     if embedding_weight_key in remapped_params:
         remapped_params["paligemma.lm_head.weight"] = remapped_params[embedding_weight_key]
     else:
-        raise KeyError(f"Could not find embedding weights ('{embedding_weight_key}') to tie to the lm_head.")
+        # Fallback for cases where the key might be different
+        embedding_weight_key_alt = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        if embedding_weight_key_alt in paligemma_params:
+            remapped_params["paligemma.lm_head.weight"] = paligemma_params[embedding_weight_key_alt]
+        else:
+            raise KeyError(f"Could not find embedding weights ('{embedding_weight_key}') to tie to the lm_head.")
 
     # Instantiate our custom PI0FastPytorch model to ensure architecture matches
     pi0_fast_model = openpi.models_pytorch.pi0_fast_pytorch.PI0FastPytorch(model_config)
 
     # Load state dict into our custom model
-    pi0_fast_model.load_state_dict(remapped_params, strict=True)
-    
+    try:
+        pi0_fast_model.load_state_dict(remapped_params, strict=True)
+    except RuntimeError as e:
+        print("Error loading state dict. This may be due to a key mismatch.")
+        print("Let's analyze the keys to find the discrepancy.")
+        
+        model_keys = set(pi0_fast_model.state_dict().keys())
+        checkpoint_keys = set(remapped_params.keys())
+        
+        missing_keys = model_keys - checkpoint_keys
+        unexpected_keys = checkpoint_keys - model_keys
+        
+        print("\n--- Key Mismatch Analysis ---")
+        if missing_keys:
+            print(f"\nMissing keys in checkpoint ({len(missing_keys)}):")
+            for key in sorted(list(missing_keys)):
+                print(f"  - {key}")
+        
+        if unexpected_keys:
+            print(f"\nUnexpected keys in checkpoint ({len(unexpected_keys)}):")
+            for key in sorted(list(unexpected_keys)):
+                print(f"  - {key}")
+
+        # Suggest a potential fix based on observed patterns
+        if all(key.startswith("model.") for key in unexpected_keys) and \
+           all(key.startswith("paligemma.model.") for key in missing_keys):
+            print("\nSuggestion: The checkpoint keys are missing the 'paligemma.' prefix.")
+            print("This is likely an issue in the conversion script where keys are not being remapped correctly.")
+        
+        raise e
+
     # --- END OF MODIFICATION ---
     if precision == "float32":
         pi0_fast_model = pi0_fast_model.to(torch.float32)
