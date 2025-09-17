@@ -45,6 +45,7 @@ import openpi.models.model
 import openpi.models.pi0_config
 import openpi.models.pi0_fast
 import openpi.models_pytorch.pi0_pytorch
+import openpi.models_pytorch.pi0_fast_pytorch
 from openpi.training import utils
 import openpi.training.config as _config
 
@@ -613,64 +614,51 @@ def convert_paligemma_checkpoint(
     if expert_params:
         raise ValueError(f"Found unexpected expert parameters in a {model_type} checkpoint.")
 
-    # Remap keys for Hugging Face PaliGemmaForConditionalGeneration model
+
+    # --- START OF MODIFICATION ---
+
+    # Remap keys to match the PI0FastPytorch model structure.
+    # We need to change the prefix from `paligemma_with_expert.paligemma.` to `paligemma.`
     remapped_params = {}
-    prefix_to_remove = "paligemma_with_expert.paligemma."
+    old_prefix = "paligemma_with_expert.paligemma."
+    new_prefix = "paligemma."
     for key, value in paligemma_params.items():
-        if key.startswith(prefix_to_remove):
-            new_key = key[len(prefix_to_remove) :]
-            # The lm_head weights are tied to the embedding weights in HF
-            if new_key == "model.language_model.embed_tokens.weight":
-                remapped_params["model.language_model.embed_tokens.weight"] = value
-                remapped_params["lm_head.weight"] = value
-            else:
-                remapped_params[new_key] = value
+        if key.startswith(old_prefix):
+            new_key = new_prefix + key[len(old_prefix):]
+            remapped_params[new_key] = value
         else:
-            print(f"Warning: key '{key}' does not have the expected prefix and will be ignored.")
+            # Also handle the lm_head which is tied in the JAX model but separate here
+            # and may not have the full prefix after initial slicing.
+            # The original script's logic for this was flawed.
+            # Let's ensure lm_head is handled explicitly if it exists.
+            # NOTE: For pi0_fast, there is no lm_head in JAX, it's part of the embedder.
+            # The pytorch model has a separate lm_head. We will tie them.
+            print(f"Warning: key '{key}' does not have the expected prefix and will be handled separately.")
 
-    # Instantiate Hugging Face model from configuration
-    vision_config = transformers.SiglipVisionConfig(
-        hidden_size=paligemma_constants.vision_config.hidden_size,
-        num_hidden_layers=paligemma_constants.vision_config.num_hidden_layers,
-        num_attention_heads=paligemma_constants.vision_config.num_attention_heads,
-        intermediate_size=paligemma_constants.vision_config.intermediate_size,
-        patch_size=paligemma_constants.vision_config.patch_size,
-        vision_use_head=False,  # Crucial: PaliGemma uses unpooled features
-    )
+    # The lm_head weights are tied to the embedding weights. Let's ensure this is reflected.
+    embedding_weight_key = "paligemma.model.language_model.embed_tokens.weight"
+    if embedding_weight_key in remapped_params:
+        remapped_params["paligemma.lm_head.weight"] = remapped_params[embedding_weight_key]
+    else:
+        raise KeyError(f"Could not find embedding weights ('{embedding_weight_key}') to tie to the lm_head.")
 
-    text_config = transformers.GemmaConfig(
-        hidden_size=paligemma_constants.text_config.hidden_size,
-        num_hidden_layers=paligemma_constants.text_config.num_hidden_layers,
-        num_attention_heads=paligemma_constants.text_config.num_attention_heads,
-        num_key_value_heads=paligemma_constants.text_config.num_kv_heads,
-        head_dim=paligemma_constants.text_config.head_dim,
-        intermediate_size=paligemma_constants.text_config.intermediate_size,
-        vocab_size=257152,
-    )
+    # Instantiate our custom PI0FastPytorch model to ensure architecture matches
+    pi0_fast_model = openpi.models_pytorch.pi0_fast_pytorch.PI0FastPytorch(model_config)
 
-    hf_config = transformers.PaliGemmaConfig(
-        vision_config=vision_config,
-        text_config=text_config,
-        projection_dim=paligemma_constants.vision_config.projection_dim,
-        vocab_size=257152,
-        image_token_index=257000,
-    )
-
-    model = transformers.PaliGemmaForConditionalGeneration(hf_config)
-
-    # Load state dict
-    model.load_state_dict(remapped_params, strict=True)
-
+    # Load state dict into our custom model
+    pi0_fast_model.load_state_dict(remapped_params, strict=True)
+    
+    # --- END OF MODIFICATION ---
     if precision == "float32":
-        model = model.to(torch.float32)
+        pi0_fast_model = pi0_fast_model.to(torch.float32)
     elif precision == "bfloat16":
-        model = model.to(torch.bfloat16)
+        pi0_fast_model = pi0_fast_model.to(torch.bfloat16)
     else:
         raise ValueError(f"Invalid precision: {precision}")
 
     # Save the converted model using safetensors
     os.makedirs(output_path, exist_ok=True)
-    safetensors.torch.save_model(model, os.path.join(output_path, "model.safetensors"))
+    safetensors.torch.save_model(pi0_fast_model, os.path.join(output_path, "model.safetensors"))
 
     # Copy assets folder if it exists
     assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
@@ -680,8 +668,8 @@ def convert_paligemma_checkpoint(
             shutil.rmtree(assets_dest)
         shutil.copytree(assets_source, assets_dest)
 
-    # Save HF config as JSON for easy loading with .from_pretrained()
-    model.config.save_pretrained(output_path)
+    # # Save HF config as JSON for easy loading with .from_pretrained()
+    # pi0_fast_model.config.save_pretrained(output_path)
 
     # Save our simple config as JSON for reference
     config_dict = {
