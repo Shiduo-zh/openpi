@@ -13,6 +13,7 @@ from openpi.models import model as _model
 from openpi.models.pi0_fast import Pi0FASTConfig
 from openpi.models_pytorch import preprocessing_pytorch as _preprocessing
 
+PALIGEMMA_EOS_TOKEN = 1
 
 def make_attn_mask(input_mask, mask_ar):
     """
@@ -42,6 +43,77 @@ def make_attn_mask(input_mask, mask_ar):
     valid_mask = input_mask[:, None, :] & input_mask[:, :, None]
 
     return attn_mask & valid_mask
+
+
+def left_to_right_align(
+    x: torch.Tensor, input_mask: torch.Tensor, attn_mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Converts input from left-aligned to right-aligned. PyTorch version.
+
+    This function mirrors the `vmap`ped JAX implementation. It iterates through
+    each example in the batch to calculate its true sequence length and then
+    rolls the tensors to move padding from the right to the left. This is
+    necessary for efficient KV cache prefilling.
+
+    Args:
+        x (torch.Tensor): The input embeddings of shape `(B, S, E)`.
+        input_mask (torch.Tensor): The boolean input mask of shape `(B, S)`.
+        attn_mask (torch.Tensor): The boolean attention mask of shape `(B, S, S)`.
+
+    Returns:
+        A tuple containing the right-aligned `x`, `input_mask`, and `attn_mask`.
+    """
+    out_x = []
+    out_input_mask = []
+    out_attn_mask = []
+
+    # The JAX version is vmapped, which means it processes each item in the
+    # batch independently. A simple loop is the most direct translation.
+    for i in range(x.shape[0]):
+        # Get the length of the valid sequence for this example.
+        seqlen = input_mask[i].sum()
+
+        # Roll the tensors to move the padding to the left.
+        # The shift is negative because we want to roll to the left.
+        # The number of elements is seq_len, so we shift by total_len - seqlen
+        # to align to the right. Or equivalently, shift by -seqlen to move
+        # the valid part to the left end and then it will wrap around.
+        # Let's verify the JAX logic: jnp.roll(x, -seqlen, axis=0) moves the first
+        # `seqlen` elements to the end. This aligns the valid tokens to the right.
+        shift = -int(seqlen.item())
+        out_x.append(torch.roll(x[i], shifts=shift, dims=0))
+        out_input_mask.append(torch.roll(input_mask[i], shifts=shift, dims=0))
+        out_attn_mask.append(torch.roll(attn_mask[i], shifts=(shift, shift), dims=(0, 1)))
+
+    return torch.stack(out_x), torch.stack(out_input_mask), torch.stack(out_attn_mask)
+
+
+def put_along_last_axis(
+    arr: torch.Tensor, indices: torch.Tensor, values: torch.Tensor
+) -> torch.Tensor:
+    """
+    PyTorch equivalent of the JAX `put_along_last_axis` utility.
+
+    Places `values` into `arr` at positions specified by `indices` along the
+    last axis.
+
+    Args:
+        arr (torch.Tensor): The source tensor.
+        indices (torch.Tensor): The indices where values should be placed.
+            Must be broadcastable to the shape of `values`.
+        values (torch.Tensor): The values to be placed into `arr`.
+
+    Returns:
+        A new tensor with the values placed at the specified indices.
+    """
+    # Ensure indices can be broadcast for scatter. It needs to match the dim of values.
+    if len(indices.shape) < len(values.shape):
+        indices = indices.unsqueeze(-1)
+    if arr.ndim != indices.ndim:
+        indices = indices.expand_as(arr[..., : indices.shape[-1]])
+
+    return arr.scatter(-1, indices, values.to(arr.device))
 
 
 class PI0FastPytorch(nn.Module):
@@ -218,3 +290,139 @@ class PI0FastPytorch(nn.Module):
         final_loss_per_example = loss.sum(dim=-1) / loss_mask.sum(dim=-1).clamp(min=1)
 
         return final_loss_per_example
+    
+    
+    # (The rest of the file remains the same, only sample_actions is updated)
+
+    @torch.no_grad()
+    def sample_actions(
+        self,
+        observation: _model.Observation,
+        *,
+        max_decoding_steps: int = 256,
+        temperature: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        Generates action sequences autoregressively based on an observation.
+
+        This method is a PyTorch translation of the original JAX implementation.
+        It performs manual decoding without using the high-level `generate`
+        method to ensure logic parity.
+
+        The process involves:
+        1. Embedding the input observation (images and text prompt).
+        2. Right-aligning the sequences to handle padding efficiently.
+        3. A 'prefill' forward pass to compute the KV cache for the prompt.
+        4. A step-by-step decoding loop to generate one token at a time.
+
+        Args:
+            observation (_model.Observation): The input observation.
+            max_decoding_steps (int): The maximum number of tokens to generate.
+            temperature (float): The temperature for sampling. 0.0 means greedy.
+
+        Returns:
+            torch.Tensor: A tensor of shape `(B, max_decoding_steps)` containing
+                the generated token IDs for the actions.
+        """
+        # Ensure model is in evaluation mode
+        self.eval()
+
+        # We can infer the device from the model's parameters.
+        device = next(self.paligemma.parameters()).device
+        model_dtype = next(self.paligemma.parameters()).dtype
+
+        # 1. Preprocess and embed all inputs (prefix)
+        observation = _preprocessing.preprocess_observation_pytorch(observation, train=False)
+        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_inputs(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+
+        # 2. Left-to-right align all input token sequences for efficient prefill
+        prefix_token_embeddings, prefix_mask, prefix_attn_mask = left_to_right_align(
+            prefix_token_embeddings, prefix_mask, prefix_attn_mask
+        )
+
+        prefill_size = prefix_token_embeddings.shape[1]
+        prefill_len = prefix_mask.sum(dim=-1)
+        
+        # 3. Prefill the KV cache with a forward pass of the prefix.
+        # The Hugging Face model expects a 4D attention mask [B, 1, S, S].
+        # The position IDs are required by PaliGemma.
+        prefix_positions = torch.cumsum(prefix_mask.long(), dim=-1) - 1
+        prefix_positions = prefix_positions.to(device)
+
+        # **CORRECTED LOGIC: Call language_model, not the top-level model.**
+        # This returns hidden states and the KV cache.
+        outputs = self.paligemma.language_model(
+            inputs_embeds=prefix_token_embeddings,
+            attention_mask=prefix_attn_mask[:, None, :, :],
+            position_ids=prefix_positions,
+            use_cache=True,
+        )
+        hidden_states = outputs.last_hidden_state
+        kv_cache = outputs.past_key_values
+
+        # 4. Prepare for decoding loop
+        # The hidden state for the *next* token is from the last valid input token.
+        # We gather these last hidden states for each item in the batch.
+        last_hidden_state = hidden_states[
+            torch.arange(len(prefill_len), device=device), prefill_len - 1, :
+        ]
+        
+        # **CORRECTED LOGIC: Manually apply lm_head.**
+        last_logit = self.paligemma.lm_head(last_hidden_state)
+        last_logit = last_logit.unsqueeze(1)  # Shape: [B, 1, V]
+
+        batch_size = last_logit.shape[0]
+        output_tokens = torch.zeros(
+            (batch_size, max_decoding_steps), dtype=torch.long, device=device
+        )
+        all_eos = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for step in range(max_decoding_steps):
+            if all_eos.all():
+                break
+
+            # 5. Sample a token from the last logit
+            if temperature > 0.0:
+                probs = F.softmax(last_logit / temperature, dim=-1)
+                # Squeeze to remove the sequence length of 1 for multinomial
+                token = torch.multinomial(probs.squeeze(1), num_samples=1)
+            else:
+                token = torch.argmax(last_logit, dim=-1)
+
+            # Mask out generation for sequences that have already finished
+            token[all_eos] = 0
+
+            # Update the output tokens tensor
+            output_tokens = put_along_last_axis(
+                output_tokens,
+                torch.full((batch_size, 1), step, device=device, dtype=torch.long),
+                token,
+            )
+
+            # Check for early stopping
+            has_eos = (token == PALIGEMMA_EOS_TOKEN).squeeze(-1)
+            all_eos = all_eos | has_eos
+
+            # 6. Decode one step
+            token_embedding = self.paligemma.language_model.embed_tokens(token)
+
+            # Position IDs for the new token
+            positions = prefill_len + step
+            positions = positions.to(device)
+            
+            # The transformers implementation of the decoder with KV cache handles
+            # the attention mask internally. We just need to provide the new token,
+            # its position, and the cache.
+            outputs = self.paligemma.language_model(
+                inputs_embeds=token_embedding,
+                position_ids=positions,
+                past_key_values=kv_cache,
+                use_cache=True,
+            )
+            
+            # **CORRECTED LOGIC: Manually apply lm_head.**
+            last_logit = self.paligemma.lm_head(outputs.last_hidden_state)
+            kv_cache = outputs.past_key_values
+
+        return output_tokens

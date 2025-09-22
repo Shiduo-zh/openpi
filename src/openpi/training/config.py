@@ -567,12 +567,15 @@ class TrainConfig:
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
+    
+    # stop gradient: only for pi05
+    use_stop_gradient: bool = False
 
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
 
-    # Specifies which weights should be frozen.
+    # Specifies which weights should be frozen. TODO: we need to master this, to fine tune whatever we want
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
 
     # Determines the data to be trained on.
@@ -1040,7 +1043,7 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi05_base/",
         num_train_steps=30_000,
         batch_size=32,
@@ -1057,6 +1060,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64
@@ -1088,6 +1092,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=100_000,
         batch_size=32,
         num_workers=64
@@ -1103,7 +1108,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
-        
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/",
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64,
@@ -1119,6 +1124,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_paligemma_base/",
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64
@@ -1141,6 +1147,22 @@ _CONFIGS = [
         num_workers=64,
     ),
     TrainConfig(
+        name="pi05_posttrain_vlabench_primitive",
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi05_base/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
         name="pifast_posttrain_vlabench_primitive",
         model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
         data=LeRobotVLABenchDataConfig(
@@ -1151,6 +1173,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64
@@ -1166,6 +1189,23 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_pretrain_vlabench_primitive",
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64,
@@ -1181,6 +1221,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_paligemma_base/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64
@@ -1196,7 +1237,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 local_files_only=True,  # Set to True for local-only datasets.
                 prompt_from_task=True,
-            ),
+            ),                                
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
         pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
@@ -1215,6 +1256,23 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/", # init from paligemma.npz
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_ft_scratch_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_ft_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/", # init from paligemma.npz
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64,
@@ -1236,6 +1294,22 @@ _CONFIGS = [
         num_workers=64,
     ),
     TrainConfig(
+        name="pi05_posttrain_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_base/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
         name="pi0_pretrain_vlabench_primitive_aligned",
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b"),
         data=AlignedLeRobotVLABenchDataConfig(
@@ -1246,6 +1320,23 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/",
+        num_train_steps=200_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="pi05_pretrain_vlabench_primitive_aligned",
+        model=pi0_config.Pi0Config(pi05=True, discrete_state_input=False, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_action_expert_rand_init/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64,
@@ -1261,6 +1352,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64
@@ -1277,6 +1369,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64
@@ -1292,6 +1385,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_fast_base/params"),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_pi0_fast_base/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64
@@ -1322,6 +1416,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        pytorch_weight_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/torch_paligemma_base/",
         num_train_steps=200_000,
         batch_size=32,
         num_workers=64

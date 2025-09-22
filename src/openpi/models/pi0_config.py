@@ -31,6 +31,7 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    use_stop_gradient: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:

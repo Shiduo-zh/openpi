@@ -89,8 +89,11 @@ def init_train_state(
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
-        # initialize the model (and its parameters).
-        model = config.model.create(model_rng)
+        cfg = config
+        if cfg.use_stop_gradient:
+            from dataclasses import replace
+            cfg = replace(cfg, model=replace(cfg.model, use_stop_gradient=True))
+        model = cfg.model.create(model_rng)
 
         # Merge the partial params into the model.
         if partial_params is not None:
