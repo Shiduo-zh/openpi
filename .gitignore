@@ -3,6 +3,7 @@ assets/
 checkpoints/
 data/
 wandb/
+evaluate_results/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
