@@ -49,6 +49,34 @@ import openpi.models_pytorch.pi0_fast_pytorch
 from openpi.training import utils
 import openpi.training.config as _config
 
+class PaliGemmaConstants:
+    """Holds the architectural constants for the base PaliGemma-2B model."""
+    def __init__(self):
+        self.vision_config = type(
+            "obj",
+            (object,),
+            {
+                "hidden_size": 1152,
+                "num_hidden_layers": 27,
+                "num_attention_heads": 16,
+                "intermediate_size": 4304,
+                "patch_size": 14,
+                "projection_dim": 2048,
+            },
+        )()
+        self.text_config = type(
+            "obj",
+            (object,),
+            {
+                "hidden_size": 2048,
+                "num_hidden_layers": 18,
+                "num_attention_heads": 8,
+                "num_kv_heads": 1,  # Important for gemma-2b
+                "head_dim": 256,
+                "intermediate_size": 16384,
+            },
+        )()
+
 
 def slice_paligemma_state_dict(state_dict, config):
     """Convert PaliGemma JAX parameters to PyTorch format."""
@@ -420,6 +448,26 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
     checkpointer = ocp.PyTreeCheckpointer()
     metadata = checkpointer.metadata(f"{checkpoint_dir}/params")
     print(utils.array_tree_to_info(metadata))
+    
+def load_params_from_npz(npz_path: str):
+    """Load and process params from a .npz file, stripping the 'params/' prefix."""
+    print(f"Loading and preprocessing parameters from .npz file: {npz_path}")
+    raw_params = np.load(npz_path)
+    
+    # The keys in the NPZ file have a 'params/' prefix that needs to be removed.
+    processed_params = {}
+    prefix_to_strip = "params/"
+    for key, value in raw_params.items():
+        if key.startswith(prefix_to_strip):
+            new_key = key[len(prefix_to_strip):]
+            processed_params[new_key] = value
+        else:
+            # If a key somehow doesn't have the prefix, keep it as is.
+            processed_params[key] = value
+            
+    # Wrap it in the same structure as slice_initial_orbax_checkpoint for consistency.
+    return {"paligemma_params": processed_params, "projection_params": {}}
+
 
 
 def convert_pi0_checkpoint(
@@ -558,8 +606,92 @@ def convert_pi0_checkpoint(
     print(f"Model saved to {output_path}")
 
 
+def create_hybrid_pi0_checkpoint(
+    npz_path: str, precision: str, output_path: str, model_config: openpi.models.pi0_config.Pi0Config
+):
+    """
+    Creates a PI0 checkpoint by loading the VLM from a PaliGemma NPZ file
+    and leaving the action expert and projection heads randomly initialized.
+    """
+    print("--- Creating a hybrid PI0 checkpoint ---")
+    
+    # 1. Instantiate the target PI0 model. It will be randomly initialized.
+    print(f"Initializing a new PI0 model with config: {model_config.action_expert_variant}")
+    pi0_model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_config)
+
+    # 2. Load PaliGemma parameters from the NPZ file and preprocess them.
+    print(f"Loading VLM weights from: {npz_path}")
+    initial_vlm_params = load_params_from_npz(npz_path)
+    
+    # 3. Convert the VLM params to a PyTorch state_dict format.
+    print("Converting VLM weights to PyTorch format...")
+    paligemma_constants = PaliGemmaConstants()
+    vlm_state_dict, _ = slice_paligemma_state_dict(
+        initial_vlm_params["paligemma_params"], paligemma_constants
+    )
+    
+    # 4. Load the VLM weights into the PI0 model.
+    #    strict=False is crucial here. It allows us to load a partial state_dict,
+    #    ignoring missing keys (action expert, projection layers).
+    print("Loading VLM weights into PI0 model. Action expert and projection heads remain randomly initialized.")
+    missing_keys, unexpected_keys = pi0_model.load_state_dict(vlm_state_dict, strict=False)
+    
+    # Derive the list of successfully loaded keys.
+    # It's all keys in the model minus the ones that were reported as missing.
+    all_model_keys = set(pi0_model.state_dict().keys())
+    loaded_keys = sorted(list(all_model_keys - set(missing_keys)))
+    randomly_initialized_keys = sorted(missing_keys) # These are the missing_keys
+    
+    print("\n--- Model Initialization Report ---")
+
+    if loaded_keys:
+        print(f"\n✅ Successfully loaded {len(loaded_keys)} parameters from the NPZ file:")
+        for key in loaded_keys:
+            print(f"  - {key}")
+
+    if randomly_initialized_keys:
+        print(f"\n✨ The following {len(randomly_initialized_keys)} parameters were randomly initialized:")
+        for key in randomly_initialized_keys:
+            print(f"  - {key}")
+
+    if unexpected_keys:
+        # Sort for consistent output
+        unexpected_keys = sorted(unexpected_keys)
+        print(f"\n⚠️ The following {len(unexpected_keys)} keys from the NPZ file were not used (unexpected in the target model):")
+        for key in unexpected_keys:
+            print(f"  - {key}")
+
+    # --- END OF MODIFICATION ---
+            
+    # 5. Set precision and save the model.
+    if precision == "float32":
+        pi0_model = pi0_model.to(torch.float32)
+    elif precision == "bfloat16":
+        pi0_model = pi0_model.to(torch.bfloat16)
+    else:
+        raise ValueError(f"Invalid precision: {precision}")
+        
+    os.makedirs(output_path, exist_ok=True)
+    safetensors.torch.save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
+
+    # Also save a config.json for reference
+    config_dict = {
+        "action_dim": model_config.action_dim,
+        "action_horizon": model_config.action_horizon,
+        "paligemma_variant": model_config.paligemma_variant,
+        "action_expert_variant": model_config.action_expert_variant,
+        "precision": precision,
+        "init_type": "hybrid_from_paligemma_npz"
+    }
+    with open(os.path.join(output_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+    print("\nHybrid PI0 model created and saved successfully!")
+    print(f"Model saved to {output_path}")
+
+
 def convert_paligemma_checkpoint(
-    checkpoint_dir: str, precision: str, output_path: str, model_config
+    initial_params: dict, precision: str, output_path: str, model_config, assets_path: str | None = None
 ):
     """
     Convert a JAX PaliGemma-style checkpoint (like pi0_fast or a standalone PaliGemma) to PyTorch format.
@@ -571,11 +703,10 @@ def convert_paligemma_checkpoint(
         model_config: The model configuration object.
     """
     model_type = "PI0-Fast" if isinstance(model_config, openpi.models.pi0_fast.Pi0FASTConfig) else "PaliGemma"
-    print(f"Converting {model_type} checkpoint from {checkpoint_dir} to {output_path}")
     print(f"Model config: {model_config}")
 
     # Break down orbax ckpts by restoring via JAX to respect dtype
-    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision="float32")
+    # initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision="float32")
 
     # This helper class holds the architectural constants for PaliGemma-2B.
     class PaliGemmaConstants:
@@ -691,7 +822,7 @@ def convert_paligemma_checkpoint(
     safetensors.torch.save_model(pi0_fast_model, os.path.join(output_path, "model.safetensors"))
 
     # Copy assets folder if it exists
-    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
+    assets_source = assets_path / "assets"
     if assets_source.exists():
         assets_dest = pathlib.Path(output_path) / "assets"
         if assets_dest.exists():
@@ -721,6 +852,7 @@ def main(
     precision: Literal["float32", "bfloat16", "float16"] = "bfloat16",
     *,
     inspect_only: bool = False,
+    init_pi0_from_paligemma_npz: bool = False
 ):
     """Load JAX model and optionally convert to PyTorch.
 
@@ -731,6 +863,7 @@ def main(
         precision: Precision for model conversion.
         inspect_only: Only inspect parameter keys, don't convert.
     """
+    is_npz = os.path.isfile(checkpoint_dir) and checkpoint_dir.endswith(".npz")
     model_config = _config.get_config(config_name).model
     if inspect_only:
         load_jax_model_and_print_keys(checkpoint_dir)
@@ -739,13 +872,32 @@ def main(
     if not output_path:
         print("Error: --output_path is required for conversion. Use --inspect_only to only view keys.")
         return
+    
+    if init_pi0_from_paligemma_npz:
+        if not is_npz:
+            raise ValueError("--init-pi0-from-paligemma-npz requires model_path to be a .npz file.")
+        if not isinstance(model_config, openpi.models.pi0_config.Pi0Config):
+            raise ValueError("--init-pi0-from-paligemma-npz requires a pi0 config (e.g., 'pi0_droid').")
+        
+        create_hybrid_pi0_checkpoint(checkpoint_dir, precision, output_path, model_config)
+        return # We are done, exit the function.
 
     if isinstance(model_config, openpi.models.pi0_config.Pi0Config):
         convert_pi0_checkpoint(checkpoint_dir, precision, output_path, model_config)
     else:
+        if is_npz:
+            initial_params = load_params_from_npz(checkpoint_dir)
+            # For assets, search in the parent directory of the npz file
+            assets_search_path = pathlib.Path(checkpoint_dir).parent
+            print(f"Converting paligemma checkpoint from {checkpoint_dir} to {output_path}")
+        else:
+            # Break down orbax ckpts by restoring via JAX to respect dtype
+            initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision="float32")
+            assets_search_path = pathlib.Path(checkpoint_dir).parent
+            print(f"Converting pi0_fast checkpoint from {checkpoint_dir} to {output_path}")
         # This branch handles PI0-Fast, standalone PaliGemma, and any other
         # single-VLM architectures based on PaliGemma.
-        convert_paligemma_checkpoint(checkpoint_dir, precision, output_path, model_config)
+        convert_paligemma_checkpoint(initial_params, precision, output_path, model_config, assets_search_path)
 
 
 if __name__ == "__main__":
