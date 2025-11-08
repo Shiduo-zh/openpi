@@ -1,5 +1,12 @@
 # openpi
 
+## pi05 supported on VLAbench
+we adjust the openpi repo to fit the vlabench, such as
+
+- add various vlabench config examples
+- support stop-gradient training at the jax framework for pi0/pi05
+- You can get more info from [here](docs/vlabench_modified.md)
+
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
 
 Currently, this repo contains three types of models:
